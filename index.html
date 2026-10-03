@@ -1587,7 +1587,7 @@ function wire() {
 
 /* ===== PATCH v3: fixes from code review ===== */
 (function(){
-function side(d,p){ return p<=BREAK_AFTER[d]?0:1; }
+function side(d,p){var n=0;(BREAKS[d]||[]).forEach(function(b){if(p>b)n++;});return n;}
 
 /* 1. Timetable grid: show every period, add a real BREAK row */
 window.makeTT=function(field,id){
@@ -1606,9 +1606,9 @@ window.makeTT=function(field,id){
         (x.roomId?' \u2022 '+esc(nameOf(db.rooms,x.roomId)):'')+'</small></div></td>';
     });
     h+='</tr>';
-    if(DAYS.some(function(d){return BREAK_AFTER[d]===p;})){
+    if(DAYS.some(function(d){return (BREAKS[d]||[]).indexOf(p)>=0;})){
       h+='<tr><th class="period">\u2615</th>'+DAYS.map(function(d){
-        return BREAK_AFTER[d]===p?'<td class="brk">BREAK</td>':'<td></td>';}).join('')+'</tr>';
+        return (BREAKS[d]||[]).indexOf(p)>=0?'<td class="brk">BREAK</td>':'<td></td>';}).join('')+'</tr>';
     }
   }
   return h+'</table></div>';
@@ -1839,7 +1839,7 @@ window.renderAvailability=function(){
 /* ===== v4: aSc-style features: colour cards, lock/move/swap, double lessons, master view, CSV ===== */
 (function(){
 var sel=null;
-function side(d,p){return p<=BREAK_AFTER[d]?0:1;}
+function side(d,p){var n=0;(BREAKS[d]||[]).forEach(function(b){if(p>b)n++;});return n;}
 function hue(s){var h=0;String(s).split('').forEach(function(ch){h=(h*31+ch.charCodeAt(0))%360;});return h;}
 function sty(id){var h=hue(nameOf(db.subjects,id));return 'background:hsl('+h+',85%,93%);border-color:hsl('+h+',55%,72%)';}
 function abbr(id){var s=db.subjects.find(function(x){return x.id===id;})||{};return s.code||(s.name||'?').slice(0,4);}
@@ -1859,8 +1859,8 @@ window.makeTT=function(field,id){
       h+='<td'+at+'><div class="lesson'+(sel===x.id?' sel':'')+'" data-lid="'+esc(x.id)+'" style="'+sty(x.subjectId)+'"><button class="lk" title="Lock / unlock" aria-label="Lock or unlock lesson">'+(x.locked?'\uD83D\uDD12':'\uD83D\uDD13')+'</button><b>'+esc(nameOf(db.subjects,x.subjectId))+'</b><small>'+esc(o)+(x.roomId?' \u2022 '+esc(nameOf(db.rooms,x.roomId)):'')+'</small></div></td>';
     });
     h+='</tr>';
-    if(DAYS.some(function(d){return BREAK_AFTER[d]===p;}))
-      h+='<tr><th class="period">\u2615</th>'+DAYS.map(function(d){return BREAK_AFTER[d]===p?'<td class="brk">BREAK</td>':'<td></td>';}).join('')+'</tr>';
+    if(DAYS.some(function(d){return (BREAKS[d]||[]).indexOf(p)>=0;}))
+      h+='<tr><th class="period">\u2615</th>'+DAYS.map(function(d){return (BREAKS[d]||[]).indexOf(p)>=0?'<td class="brk">BREAK</td>':'<td></td>';}).join('')+'</tr>';
   }
   return h+'</table></div>';
 };
@@ -1989,7 +1989,7 @@ function renderMaster(){
   var mode=document.getElementById('masterMode').value,list=mode==='classId'?db.classes:mode==='teacherId'?db.teachers:db.rooms,cols=[],ix={};
   DAYS.forEach(function(d){STRUCT[d].forEach(function(p){cols.push([d,p]);});});
   db.schedule.forEach(function(x){if(x[mode])ix[x[mode]+'|'+x.day+'|'+x.period]=x;});
-  var h='<div class="tablewrap"><table class="mt"><tr><th rowspan="2"></th>'+DAYS.map(function(d){return '<th colspan="'+STRUCT[d].length+'">'+d.slice(0,3)+'</th>';}).join('')+'</tr><tr>'+cols.map(function(c){return '<th>'+c[1]+'</th>';}).join('')+'</tr>';
+  var h='<div class="tablewrap"><table class="mt"><tr><th rowspan="2"></th>'+DAYS.filter(function(d){return STRUCT[d].length;}).map(function(d){return '<th colspan="'+STRUCT[d].length+'">'+d.slice(0,3)+'</th>';}).join('')+'</tr><tr>'+cols.map(function(c){return '<th>'+c[1]+'</th>';}).join('')+'</tr>';
   list.forEach(function(e){
     h+='<tr><th style="text-align:left;white-space:nowrap">'+esc(e.name)+'</th>'+cols.map(function(c){
       var x=ix[e.id+'|'+c[0]+'|'+c[1]];if(!x)return '<td></td>';
@@ -2011,6 +2011,82 @@ document.getElementById('masterMode').onchange=renderMaster;
 document.getElementById('btnCsv').onclick=exportCSV;
 var _ra4=renderAll;
 window.renderAll=function(){_ra4();renderMaster();};
+})();
+
+
+/* ===== v5: customisable periods and breaks ===== */
+var BREAKS = {};
+(function(){
+var DEF={Monday:{on:true,from:0,to:8,breaks:[4]},Tuesday:{on:true,from:0,to:8,breaks:[4]},Wednesday:{on:true,from:0,to:8,breaks:[4]},Thursday:{on:true,from:0,to:8,breaks:[4]},Friday:{on:true,from:1,to:6,breaks:[5]}};
+function clamp(v,lo,hi){v=parseInt(v,10);return isNaN(v)?lo:Math.max(lo,Math.min(hi,v));}
+function cfg(d){
+  var c=(db.structure&&db.structure[d])||DEF[d]||DEF.Monday;
+  var on=!(c.on===false||c.on===0),from=clamp(c.from,0,8),to=clamp(c.to,from,8),seen={};
+  var br=(Array.isArray(c.breaks)?c.breaks:[]).map(Number).filter(function(b){
+    if(!Number.isInteger(b)||b<from||b>=to||seen[b])return false;seen[b]=1;return true;}).sort(function(a,b){return a-b;});
+  return{on:on,from:from,to:to,breaks:br};
+}
+window.applyStructure=function(){
+  DAYS.forEach(function(d){
+    var c=cfg(d),a=STRUCT[d];a.length=0;
+    if(c.on)for(var p=c.from;p<=c.to;p++)a.push(p);
+    BREAKS[d]=c.on?c.breaks:[];BREAK_AFTER[d]=BREAKS[d].length?BREAKS[d][0]:-1;
+  });
+};
+function sel(d,f,v){var h='<select data-sd="'+d+'" data-f="'+f+'" aria-label="'+d+' '+f+' period" style="width:70px">';
+  for(var i=0;i<=8;i++)h+='<option'+(i===v?' selected':'')+'>'+i+'</option>';return h+'</select>';}
+function readForm(){
+  var o={};
+  DAYS.forEach(function(d){
+    var q=function(f){return document.querySelector('[data-sd="'+d+'"][data-f="'+f+'"]');};
+    var raw=q('breaks').value.split(/[,\s]+/).filter(Boolean);
+    if(raw.some(function(x){return !/^\d$/.test(x);}))throw new Error(d+': breaks must be numbers like 2, 5');
+    var c={on:q('on').checked,from:+q('from').value,to:+q('to').value,breaks:raw.map(Number)};
+    if(c.on&&c.to<c.from)throw new Error(d+': last period is before the first period');
+    var bad=c.breaks.filter(function(b){return b<c.from||b>=c.to;});
+    if(c.on&&bad.length)throw new Error(d+': a break after period '+bad[0]+' must fall between the first and last period (not after the last)');
+    o[d]=c;
+  });
+  return o;
+}
+function summary(){
+  return DAYS.map(function(d){var c=cfg(d);if(!c.on)return d.slice(0,3)+': off';
+    var s=[],st=c.from;c.breaks.forEach(function(b){s.push('P'+st+(b>st?'\u2013'+b:''));st=b+1;});s.push('P'+st+(c.to>st?'\u2013'+c.to:''));
+    return d.slice(0,3)+': '+s.join(' | break | ');}).join('   \u2022   ');
+}
+function invalidCount(){return db.schedule.filter(function(x){return !STRUCT[x.day]||STRUCT[x.day].indexOf(+x.period)<0;}).length;}
+function applyForm(){
+  var o,prev=db.structure;
+  try{o=readForm();}catch(e){setStatus(e.message,'err');return;}
+  db.structure=o;applyStructure();
+  var n=invalidCount();
+  if(n&&!confirm(n+' scheduled lesson(s) fall outside the new periods and will be removed. Continue?')){db.structure=prev;applyStructure();return;}
+  db.schedule=db.schedule.filter(function(x){return STRUCT[x.day]&&STRUCT[x.day].indexOf(+x.period)>=0;});
+  saveData();renderAll();
+  setStatus('Structure applied.'+(n?' '+n+' lesson(s) removed. Regenerate the timetable.':db.schedule.length?' Existing lessons were kept; regenerate to use the new breaks.':''),n?'warn':'ok');
+}
+var _rs=renderSetup;
+window.renderSetup=function(){
+  _rs();
+  var st=document.getElementById('structureTable');if(!st)return;
+  var h='<div class="tablewrap"><table><tr><th>Day</th><th>Teaching day</th><th>First period</th><th>Last period</th><th>Breaks after period(s)</th></tr>';
+  DAYS.forEach(function(d){var c=cfg(d);
+    h+='<tr><td>'+d+'</td><td><input type="checkbox" data-sd="'+d+'" data-f="on" aria-label="'+d+' is a teaching day"'+(c.on?' checked':'')+'></td><td>'+sel(d,'from',c.from)+'</td><td>'+sel(d,'to',c.to)+'</td>'+
+      '<td><input data-sd="'+d+'" data-f="breaks" value="'+c.breaks.join(', ')+'" placeholder="e.g. 2, 5" aria-label="'+d+' breaks" style="width:110px"></td></tr>';});
+  st.innerHTML=h+'</table></div><div class="actions" style="margin-top:10px"><button class="btn primary" id="btnApplyStruct">Apply structure</button>'+
+    '<button class="btn" id="btnCopyMon">Copy Monday to all days</button><button class="btn" id="btnDefStruct">Reset to default</button></div>';
+  var note=st.parentNode.querySelector('.notice');if(note)note.textContent='Current: '+summary()+'. Several breaks: type 2, 5 (a break after period 2 and after period 5).';
+  document.getElementById('btnApplyStruct').onclick=applyForm;
+  document.getElementById('btnDefStruct').onclick=function(){db.structure=null;applyStructure();renderAll();setStatus('Default structure restored. Click Save, then regenerate.','warn');};
+  document.getElementById('btnCopyMon').onclick=function(){
+    var g=function(d,f){return document.querySelector('[data-sd="'+d+'"][data-f="'+f+'"]');};
+    DAYS.slice(1).forEach(function(d){g(d,'on').checked=g('Monday','on').checked;g(d,'from').value=g('Monday','from').value;g(d,'to').value=g('Monday','to').value;g(d,'breaks').value=g('Monday','breaks').value;});
+    setStatus('Copied. Click "Apply structure" to use it.','warn');
+  };
+};
+var _ra5=renderAll;
+window.renderAll=function(){applyStructure();_ra5();};
+applyStructure();
 })();
 
 try {
