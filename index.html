@@ -68,6 +68,13 @@ input[type=checkbox]{width:auto;padding:0}
 .tt td.na{background:#fafbfc;color:#98a2b3}
 @page{size:A4 landscape;margin:10mm}
 @media print{.tt{min-width:0}.tt th,.tt td{min-width:0;font-size:10px}}
+
+/* v4 aSc-style features */
+.lesson{position:relative;cursor:pointer;text-align:left}
+.lesson.sel{outline:3px solid #315efb}
+.lk{position:absolute;top:1px;right:1px;border:0;background:none;cursor:pointer;font-size:11px;padding:0;line-height:1}
+.mt{font-size:10px;min-width:max-content}.mt th,.mt td{text-align:center;padding:3px;min-width:34px;border:1px solid var(--line);vertical-align:middle}
+@media print{#master.panel.active{display:block!important}.lk{display:none}}
 </style>
 </head>
 <body>
@@ -1826,6 +1833,184 @@ window.renderAvailability=function(){
     cb.setAttribute('aria-label','Block '+nameOf(db.teachers,p[0])+' '+p[1]+' period '+p[2]);
   });
 };
+})();
+
+
+/* ===== v4: aSc-style features: colour cards, lock/move/swap, double lessons, master view, CSV ===== */
+(function(){
+var sel=null;
+function side(d,p){return p<=BREAK_AFTER[d]?0:1;}
+function hue(s){var h=0;String(s).split('').forEach(function(ch){h=(h*31+ch.charCodeAt(0))%360;});return h;}
+function sty(id){var h=hue(nameOf(db.subjects,id));return 'background:hsl('+h+',85%,93%);border-color:hsl('+h+',55%,72%)';}
+function abbr(id){var s=db.subjects.find(function(x){return x.id===id;})||{};return s.code||(s.name||'?').slice(0,4);}
+
+/* colour-coded, editable cards */
+window.makeTT=function(field,id){
+  var ix={};
+  db.schedule.forEach(function(a){if(a[field]===id)ix[a.day+'|'+a.period]=a;});
+  var h='<div class="tablewrap"><table class="tt"><tr><th class="period">Period</th>'+DAYS.map(function(d){return '<th>'+d+'</th>';}).join('')+'</tr>';
+  for(var p=0;p<9;p++){
+    h+='<tr><th class="period">P'+p+'</th>';
+    DAYS.forEach(function(d){
+      if(STRUCT[d].indexOf(p)<0){h+='<td class="na">\u2014</td>';return;}
+      var x=ix[d+'|'+p],at=' data-d="'+d+'" data-p="'+p+'"';
+      if(!x){h+='<td'+at+'></td>';return;}
+      var o=field==='classId'?nameOf(db.teachers,x.teacherId):nameOf(db.classes,x.classId);
+      h+='<td'+at+'><div class="lesson'+(sel===x.id?' sel':'')+'" data-lid="'+esc(x.id)+'" style="'+sty(x.subjectId)+'"><button class="lk" title="Lock / unlock" aria-label="Lock or unlock lesson">'+(x.locked?'\uD83D\uDD12':'\uD83D\uDD13')+'</button><b>'+esc(nameOf(db.subjects,x.subjectId))+'</b><small>'+esc(o)+(x.roomId?' \u2022 '+esc(nameOf(db.rooms,x.roomId)):'')+'</small></div></td>';
+    });
+    h+='</tr>';
+    if(DAYS.some(function(d){return BREAK_AFTER[d]===p;}))
+      h+='<tr><th class="period">\u2615</th>'+DAYS.map(function(d){return BREAK_AFTER[d]===p?'<td class="brk">BREAK</td>':'<td></td>';}).join('')+'</tr>';
+  }
+  return h+'</table></div>';
+};
+
+/* manual edit: select, move, swap, lock */
+function why(l,d,p,ign){
+  if(STRUCT[d].indexOf(p)<0)return 'That period does not exist.';
+  if(blocked(l.teacherId,d,p))return nameOf(db.teachers,l.teacherId)+' is unavailable then.';
+  var c=db.schedule.find(function(x){return ign.indexOf(x.id)<0&&x.day===d&&x.period===p&&(x.classId===l.classId||x.teacherId===l.teacherId||(l.roomId&&x.roomId===l.roomId));});
+  return c?'Clash: '+nameOf(db.classes,c.classId)+' / '+nameOf(db.teachers,c.teacherId)+' is already there.':'';
+}
+function find(id){return db.schedule.find(function(x){return x.id===id;});}
+function done(msg){saveData();renderAll();setStatus(msg,'ok');}
+document.getElementById('timetable').addEventListener('click',function(e){
+  var card=e.target.closest('[data-lid]'),cell=e.target.closest('td[data-d]');
+  if(card&&e.target.closest('.lk')){var l=find(card.dataset.lid);l.locked=!l.locked;done(l.locked?'Lesson locked: kept on regenerate.':'Lesson unlocked.');return;}
+  if(card){
+    var id=card.dataset.lid;
+    if(sel&&sel!==id){
+      var a=find(sel),b=find(id),m=why(a,b.day,b.period,[a.id,b.id])||why(b,a.day,a.period,[a.id,b.id]);
+      if(m){setStatus('Cannot swap. '+m,'err');return;}
+      var t=[a.day,a.period];a.day=b.day;a.period=b.period;b.day=t[0];b.period=t[1];a.locked=b.locked=true;sel=null;done('Lessons swapped and locked.');return;
+    }
+    sel=sel===id?null:id;renderTimetable();return;
+  }
+  if(cell&&sel){
+    var s=find(sel),m2=why(s,cell.dataset.d,+cell.dataset.p,[s.id]);
+    if(m2){setStatus('Cannot move. '+m2,'err');return;}
+    s.day=cell.dataset.d;s.period=+cell.dataset.p;s.locked=true;sel=null;done('Lesson moved and locked.');
+  }
+});
+document.getElementById('timetable').insertAdjacentHTML('afterbegin','<div class="notice">Click a lesson to select it, then click an empty slot to move it or another lesson to swap. \uD83D\uDD12 locked lessons stay put when you regenerate.</div>');
+
+/* lessons: honour locks, build double lessons for subjects marked Double */
+window.lessonUnits=function(){
+  var cnt={},out=[];
+  (window.__locked||[]).forEach(function(l){cnt[l.reqId]=(cnt[l.reqId]||0)+1;});
+  db.requirements.forEach(function(r){
+    var n=Math.max(0,r.weeklyLessons)-(cnt[r.id]||0),s=db.subjects.find(function(x){return x.id===r.subjectId;})||{};
+    var pairs=s.doublePeriod?Math.floor(n/2):0,singles=n-pairs*2,base={reqId:r.id,classId:r.classId,subjectId:r.subjectId,teacherId:r.teacherId,roomId:r.roomId||''};
+    for(var i=0;i<pairs;i++)out.push(Object.assign({id:uid('u'),len:2},base));
+    for(var j=0;j<singles;j++)out.push(Object.assign({id:uid('u'),len:1},base));
+  });
+  return out;
+};
+
+/* solver: supports locked lessons and double periods */
+window.solve=function(units){
+  var c=db.constraints,locked=window.__locked||[],cap={};
+  var bl=new Set(db.availability.filter(function(a){return a.available===false;}).map(function(a){return a.teacherId+'|'+a.day+'|'+a.period;}));
+  db.requirements.forEach(function(r){var k=r.classId+'|'+r.subjectId;cap[k]=(cap[k]||0)+r.weeklyLessons;});
+  Object.keys(cap).forEach(function(k){var s=db.subjects.find(function(x){return x.id===k.split('|')[1];})||{};cap[k]=Math.max(Math.ceil(cap[k]/DAYS.length),s.doublePeriod?2:1);});
+  function attempt(deadline){
+    var left=units.slice(),s=[],cB=new Set(),tB=new Set(),rB=new Set(),cD={},tD={},csd={},n=0,timeUp=false;
+    function g(m,k){return m[k]||0;}
+    function runLen(u,d,p){var b=side(d,p),len=1,q;
+      for(q=p-1;q>=0&&side(d,q)===b&&tB.has(d+'|'+q+'|'+u.teacherId);q--)len++;
+      for(q=p+1;q<=8&&side(d,q)===b&&tB.has(d+'|'+q+'|'+u.teacherId);q++)len++;return len;}
+    function cand(u){
+      var out=[],sk=u.classId+'|'+u.subjectId,L=u.len;
+      for(var di=0;di<DAYS.length;di++){
+        var d=DAYS[di];
+        if(g(cD,u.classId+'|'+d)+L>c.maxClassDay||g(tD,u.teacherId+'|'+d)+L>c.maxTeacherDay)continue;
+        if(c.avoidSame&&g(csd,sk+'|'+d)+L>cap[sk])continue;
+        for(var pi=0;pi<STRUCT[d].length;pi++){
+          var p=STRUCT[d][pi];
+          if(L===2&&(STRUCT[d].indexOf(p+1)<0||side(d,p)!==side(d,p+1)))continue;
+          var good=true;
+          for(var k=0;k<L;k++){var pre=d+'|'+(p+k)+'|';if(cB.has(pre+u.classId)||tB.has(pre+u.teacherId)||bl.has(u.teacherId+'|'+d+'|'+(p+k))){good=false;break;}}
+          if(!good)continue;
+          if(runLen(u,d,p)+(L===2?runLen(u,d,p+1):0)>c.maxConsecutive)continue;
+          var room='';
+          if(u.roomId){if(rB.has(d+'|'+p+'|'+u.roomId)||(L===2&&rB.has(d+'|'+(p+1)+'|'+u.roomId)))continue;room=u.roomId;}
+          else if(c.autoRoom){room=pickRoomFor(u,d,p,rB);if(room&&L===2&&rB.has(d+'|'+(p+1)+'|'+room))room='';}
+          var sc=Math.random()*0.5;
+          if(c.distribute)sc+=g(cD,u.classId+'|'+d)*8+g(tD,u.teacherId+'|'+d)*3+g(csd,sk+'|'+d)*12;
+          if(p===0||p===8)sc+=1;
+          if(L===2&&p<=1)sc+=2;
+          out.push({day:d,period:p,roomId:room,score:sc,len:L});
+        }
+      }
+      return out;
+    }
+    function put(u,x,sign){
+      for(var k=0;k<x.len;k++){var pre=x.day+'|'+(x.period+k)+'|';
+        if(sign>0){cB.add(pre+u.classId);tB.add(pre+u.teacherId);if(x.roomId)rB.add(pre+x.roomId);}
+        else{cB.delete(pre+u.classId);tB.delete(pre+u.teacherId);if(x.roomId)rB.delete(pre+x.roomId);}}
+      cD[u.classId+'|'+x.day]=g(cD,u.classId+'|'+x.day)+sign*x.len;
+      tD[u.teacherId+'|'+x.day]=g(tD,u.teacherId+'|'+x.day)+sign*x.len;
+      var kk=u.classId+'|'+u.subjectId+'|'+x.day;csd[kk]=g(csd,kk)+sign*x.len;
+    }
+    function rec(){
+      if(!left.length)return true;
+      if((++n&15)===0&&Date.now()>deadline)timeUp=true;
+      if(timeUp)return false;
+      var bi=-1,bc=null;
+      for(var i=0;i<left.length;i++){var cs=cand(left[i]);if(!cs.length)return false;if(!bc||cs.length<bc.length){bi=i;bc=cs;if(cs.length===1)break;}}
+      bc.sort(function(a,b){return a.score-b.score;});
+      var u=left[bi];left.splice(bi,1);
+      for(var j=0;j<bc.length;j++){
+        var x=bc[j];put(u,x,1);
+        for(var k=0;k<x.len;k++)s.push({id:uid('l'),day:x.day,period:x.period+k,classId:u.classId,subjectId:u.subjectId,teacherId:u.teacherId,roomId:x.roomId||'',reqId:u.reqId});
+        if(rec())return true;
+        for(var k2=0;k2<x.len;k2++)s.pop();
+        put(u,x,-1);if(timeUp)break;
+      }
+      left.splice(bi,0,u);return false;
+    }
+    locked.forEach(function(l){s.push(Object.assign({},l));put(l,{day:l.day,period:l.period,roomId:l.roomId,len:1},1);});
+    return rec()?s:null;
+  }
+  for(var a=0;a<5;a++){var r=attempt(Date.now()+2000);if(r)return{ok:true,schedule:r};}
+  return{ok:false,reason:'No solution found within the time limit. Try unlocking some lessons, relaxing "Avoid same subject twice/day", raising max consecutive lessons, or removing availability blocks.'};
+};
+var _gs=generateSchedule;
+window.generateSchedule=function(){
+  window.__locked=db.schedule.filter(function(x){return x.locked&&db.requirements.some(function(r){return r.id===x.reqId;});});
+  _gs();
+};
+
+/* master timetable (classes / teachers / rooms) + CSV export */
+document.querySelector('.footer').insertAdjacentHTML('beforebegin','<section class="panel" id="master"><div class="card"><h3>Master Timetable <button class="btn small right" id="btnCsv">\u2B07 CSV</button></h3><div class="formgrid"><div><label for="masterMode">View by</label><select id="masterMode"><option value="classId">Classes</option><option value="teacherId">Teachers</option><option value="roomId">Rooms</option></select></div></div><div id="masterTable"></div></div></section>');
+tabs.splice(tabs.findIndex(function(t){return t[0]==='timetable';})+1,0,['master','Master View']);
+function renderMaster(){
+  var el=document.getElementById('masterTable');if(!el)return;
+  var mode=document.getElementById('masterMode').value,list=mode==='classId'?db.classes:mode==='teacherId'?db.teachers:db.rooms,cols=[],ix={};
+  DAYS.forEach(function(d){STRUCT[d].forEach(function(p){cols.push([d,p]);});});
+  db.schedule.forEach(function(x){if(x[mode])ix[x[mode]+'|'+x.day+'|'+x.period]=x;});
+  var h='<div class="tablewrap"><table class="mt"><tr><th rowspan="2"></th>'+DAYS.map(function(d){return '<th colspan="'+STRUCT[d].length+'">'+d.slice(0,3)+'</th>';}).join('')+'</tr><tr>'+cols.map(function(c){return '<th>'+c[1]+'</th>';}).join('')+'</tr>';
+  list.forEach(function(e){
+    h+='<tr><th style="text-align:left;white-space:nowrap">'+esc(e.name)+'</th>'+cols.map(function(c){
+      var x=ix[e.id+'|'+c[0]+'|'+c[1]];if(!x)return '<td></td>';
+      var o=mode==='classId'?nameOf(db.teachers,x.teacherId):nameOf(db.classes,x.classId);
+      return '<td style="'+sty(x.subjectId)+'" title="'+esc(nameOf(db.subjects,x.subjectId)+' / '+o)+'"><b>'+esc(abbr(x.subjectId))+'</b><br><small>'+esc(o.split(' ').pop().slice(0,6))+'</small></td>';}).join('')+'</tr>';
+  });
+  el.innerHTML=h+'</table></div>'+(db.schedule.length?'':'<div class="empty">No timetable generated yet.</div>');
+}
+function cv(v){v=String(v==null?'':v);return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}
+function exportCSV(){
+  var rows=[['Day','Period','Class','Subject','Teacher','Room','Locked']];
+  db.schedule.slice().sort(function(a,b){return DAYS.indexOf(a.day)-DAYS.indexOf(b.day)||a.period-b.period;}).forEach(function(x){
+    rows.push([x.day,x.period,nameOf(db.classes,x.classId),nameOf(db.subjects,x.subjectId),nameOf(db.teachers,x.teacherId),x.roomId?nameOf(db.rooms,x.roomId):'',x.locked?'yes':'']);});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob(['\uFEFF'+rows.map(function(r){return r.map(cv).join(',');}).join('\r\n')],{type:'text/csv'}));
+  a.download='timetable.csv';a.click();URL.revokeObjectURL(a.href);
+}
+document.getElementById('masterMode').onchange=renderMaster;
+document.getElementById('btnCsv').onclick=exportCSV;
+var _ra4=renderAll;
+window.renderAll=function(){_ra4();renderMaster();};
 })();
 
 try {
